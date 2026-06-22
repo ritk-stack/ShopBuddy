@@ -104,8 +104,8 @@ class FlipkartScraper:
             try:
                 driver.find_element(By.XPATH, "//button[contains(text(), '✕')]").click()
                 time.sleep(1)
-            except Exception as e:
-                print(f"Error occurred while closing popup: {e}")
+            except Exception:
+                print("Error occurred while closing popup.")
 
             # Scroll to ratings section to trigger lazy-load.
             try:
@@ -310,8 +310,8 @@ class FlipkartScraper:
 
             try:
                 driver.find_element(By.XPATH, "//button[contains(text(), '✕')]").click()
-            except Exception as e:
-                print(f"Error occurred while closing popup: {e}")
+            except Exception:
+                print("Error occurred while closing popup.")
 
             time.sleep(2)
             products = []
