@@ -44,10 +44,7 @@ class FlipkartScraper:
         options.add_argument("--remote-debugging-port=0")
         options.add_argument("--disable-blink-features=AutomationControlled")
 
-        env_version = os.getenv("CHROME_VERSION_MAIN")
-        version_main = int(env_version) if env_version and env_version.isdigit() else None
-        if version_main is None:
-            version_main = self._get_chrome_version_main(options.binary_location)
+        version_main = 149
 
         try:
             return uc.Chrome(
@@ -57,8 +54,20 @@ class FlipkartScraper:
                 version_main=version_main
             )
         except Exception:
+            # Recreate options since undetected_chromedriver does not allow reusing ChromeOptions
+            options_fallback = uc.ChromeOptions()
+            options_fallback.binary_location = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
+            options_fallback.add_argument("--no-sandbox")
+            options_fallback.add_argument("--disable-dev-shm-usage")
+            options_fallback.add_argument("--disable-gpu")
+            options_fallback.add_argument("--disable-software-rasterizer")
+            options_fallback.add_argument("--no-first-run")
+            options_fallback.add_argument("--no-default-browser-check")
+            options_fallback.add_argument("--remote-debugging-port=0")
+            options_fallback.add_argument("--disable-blink-features=AutomationControlled")
+            
             return uc.Chrome(
-                options=options,
+                options=options_fallback,
                 use_subprocess=False,
                 headless=False
             )
