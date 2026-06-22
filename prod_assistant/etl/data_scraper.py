@@ -54,7 +54,7 @@ class FlipkartScraper:
                 options=options,
                 use_subprocess=False,
                 headless=False,
-                version_main=145
+                version_main=version_main
             )
         except Exception:
             return uc.Chrome(
