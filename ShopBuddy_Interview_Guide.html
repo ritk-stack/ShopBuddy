@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ShopBuddy Interview Guide</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/github-markdown-css/5.2.0/github-markdown.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <style>
+        body { box-sizing: border-box; min-width: 200px; max-width: 980px; margin: 0 auto; padding: 45px; background: #fff; }
+        .markdown-body { box-sizing: border-box; min-width: 200px; max-width: 980px; margin: 0 auto; padding: 45px; }
+        @media (max-width: 767px) { .markdown-body { padding: 15px; } }
+        @media print { 
+            body, .markdown-body { padding: 0; margin: 0; max-width: none; } 
+            .page-break { page-break-before: always; }
+        }
+        .decision-matrix { background-color: #f6f8fa; padding: 15px; border-left: 4px solid #0366d6; margin-bottom: 20px; }
+    </style>
+</head>
+<body class="markdown-body">
+<textarea id="markdown-source" style="display:none;">
+# 🛍️ ShopBuddy (Agentic RAG): The Definitive System Design & Architecture Guide
+
+Welcome to the complete architectural and codebase guide for **ShopBuddy** (ecomm-prod-assistant). This document reads like a systems engineering textbook. It provides step-by-step algorithms, rigorous "If This, Then That" edge-case scenarios, and deep dives into Agentic workflows to demonstrate profound architectural thinking.
+
+## 🚀 Massive Introduction: Why Does ShopBuddy Exist?
+In modern e-commerce, static search bars are dead. Users expect highly conversational, intelligent assistants that can recommend products, summarize reviews, compare prices, and dynamically fall back to the live internet if a product is out of stock or out of catalog.
+
+**ShopBuddy is an Agentic Retrieval-Augmented Generation (RAG) System.** It guarantees that user queries are dynamically routed and processed safely and intelligently. It achieves this by leveraging **LangGraph** for stateful cyclical execution, **Model Context Protocol (MCP)** for highly decoupled tool servers, **DataStax AstraDB** for Serverless Vector Search, and **FastAPI** for robust, asynchronous API delivery.
+
+---
+
+## 📖 Deep-Dive Glossary of Critical Terminology
+*   **Agentic RAG:** Unlike linear RAG (Retrieve -> Generate), Agentic RAG allows an LLM to decide *whether* to retrieve, *what* to retrieve, and if it needs to *rewrite* the query or search the web if initial retrieval fails.
+*   **LangGraph State Machine:** A cyclical directed graph where the state (chat history) is passed between nodes (LLMs, Tools). It prevents infinite loops through conditional edges and allows cyclical reasoning (e.g., re-searching if data is bad).
+*   **Model Context Protocol (MCP):** An open standard that decouples tools from the core AI agent. Instead of hardcoding tools into the API, the agent talks to an MCP server over HTTP/SSE, which acts as an independent microservice providing `get_product_info` and `web_search`.
+*   **AstraDB:** A serverless, vector-enabled NoSQL database based on Apache Cassandra, used to store product embeddings.
+*   **Lifespan Events:** FastAPI async contexts that handle startup/shutdown. Used to preemptively check AstraDB connectivity and degrade gracefully if offline, rather than crashing on user requests.
+*   **Ragas (RAG Assessment):** A framework used in the CI/CD pipeline to mathematically evaluate the generated output for *Context Precision* and *Answer Relevancy*.
+
+---
+
+<div class="page-break"></div>
+
+## 🏗️ 1. High-Level Architecture (The Bird's Eye View)
+
+```mermaid
+graph TD
+    Client["User Client"] -->|"1. POST /get {msg}"| FastAPI["FastAPI Router"]
+    FastAPI -->|"2. Invoke Graph"| LangGraph["LangGraph Workflow (AgenticRAG)"]
+    
+    LangGraph -->|"3. Triage Query"| Assistant["Assistant Node (LLM)"]
+    
+    Assistant -->|"4a. Needs Data"| RetrieverNode["Retriever Node"]
+    Assistant -->|"4b. General Chat"| End["Direct Response"]
+    
+    RetrieverNode <-->|"5. Tool Call over HTTP/SSE"| MCPServer["FastMCP Server"]
+    MCPServer <-->|"6. Vector Search"| AstraDB["DataStax AstraDB"]
+    MCPServer <-->|"7. Web Search"| DuckDuckGo["DuckDuckGo API"]
+    
+    RetrieverNode -->|"8. Grade Context"| Grader["Grader Node (LLM)"]
+    Grader -->|"9a. Context Good"| Generator["Generator Node"]
+    Grader -->|"9b. Context Bad"| Rewriter["Rewriter Node"]
+    
+    Rewriter -->|"10. Rewrite & Search"| WebSearchNode["WebSearch Node"]
+    WebSearchNode --> Generator
+    
+    Generator -->|"11. Final Answer"| FastAPI
+```
+
+### The Step-By-Step Architecture Algorithm
+1. **Ingestion:** User sends a JSON payload to `http://localhost:8000/get`.
+2. **State Initialization:** The `AgenticRAG` class wraps the query in a `HumanMessage` and passes it to the LangGraph application.
+3. **Intent Detection:** The `Assistant` node evaluates the message. If it detects keywords like "price" or "product", it triggers a `TOOL: retriever` token.
+4. **Tool Execution (Decoupled):** The LangGraph `Retriever` node invokes the MCP Client. The MCP Client sends an SSE request to port 8001 (the MCP Server).
+5. **Vector Retrieval:** The FastMCP server uses `SentenceTransformers` to embed the query and searches AstraDB.
+6. **Validation:** The `Grader` node evaluates the retrieved chunks. If the chunks are irrelevant, the graph routes to the `Rewriter`.
+7. **Fallback Loop:** The `Rewriter` restructures the query and calls the MCP `web_search` tool (DuckDuckGo) to get live data.
+8. **Generation:** The final context is injected into the prompt and the LLM streams back the optimal answer.
+
+<div class="decision-matrix">
+<strong>🤔 Thinking Matrix: Architecture Edge Cases</strong>
+<ul>
+<li><strong>If</strong> AstraDB goes offline during startup... <strong>Then</strong> the FastAPI `lifespan` catches the `httpx.ConnectError`, sets the agent's MCP tools to an empty list, and gracefully degrades to base LLM chat mode. The server stays up.</li>
+<li><strong>If</strong> the user asks "What is the capital of France?"... <strong>Then</strong> the Assistant node bypasses the Retriever entirely and outputs a polite refusal to answer non-shopping questions, saving DB read costs.</li>
+</ul>
+</div>
+
+---
+
+<div class="page-break"></div>
+
+## 🔄 2. The LangGraph State Machine
+
+LangChain `AgentExecutor` was deprecated because it operates as a black box. LangGraph treats the Agent as a finite state machine.
+
+### The Step-By-Step Graph Construction
+1. **State Definition:** `AgentState` is defined as a `TypedDict` containing an append-only `messages` array annotated with `add_messages`.
+2. **Nodes Definition:** Each function (Assistant, Retriever, Generator, Rewriter) takes `state` as input and returns a dictionary that updates the state.
+3. **Edges & Routing:**
+   * `add_conditional_edges("Assistant", ...)` checks if the last message contains "TOOL: retriever". If yes, route to `"Retriever"`. Else, route to `END`.
+   * `add_conditional_edges("Retriever", ...)` calls the `_grade_documents` node. If "yes", route to `"Generator"`. If "no", route to `"Rewriter"`.
+4. **Memory:** The graph is compiled with a `MemorySaver()` checkpointer, which uses a `thread_id` to persist conversation history across multiple turns.
+
+<div class="decision-matrix">
+<strong>🤔 Thinking Matrix: LangGraph Edge Cases</strong>
+<ul>
+<li><strong>If</strong> the user enters an ambiguous query and AstraDB returns garbage... <strong>Then</strong> the Grader LLM spots the irrelevance and triggers the Rewriter. The Rewriter LLM expands the query based on chat history and hits the Web Search node. This self-correction loop is impossible in linear RAG.</li>
+<li><strong>If</strong> the graph enters an infinite loop of rewriting... <strong>Then</strong> LangGraph's internal `recursion_limit` (default 25) will trip, throwing a `GraphRecursionError` which we catch to return a generic fallback message.</li>
+</ul>
+</div>
+
+---
+
+<div class="page-break"></div>
+
+## 🔌 3. Model Context Protocol (MCP) Integration
+
+### Why MCP over direct function calling?
+Historically, tools were tightly coupled to the Agent code. If you wanted to update a tool, you had to redeploy the Agent. MCP creates a standard protocol (like LSP for IDEs) where tools exist on separate servers.
+
+### The Step-By-Step MCP Algorithm
+1. **Server Initialization:** We spin up a completely independent Python process running `fastmcp`. It listens on `http://localhost:8001/sse`.
+2. **Tool Decoration:** Functions like `@mcp.tool() async def get_product_info()` are exposed to the network automatically.
+3. **Client Discovery:** During FastAPI startup, the `MultiServerMCPClient` connects to the MCP server, requests its schema, and converts the remote functions into LangChain-compatible `BaseTool` objects.
+4. **Invocation:** When LangGraph calls `tool.ainvoke()`, the client serializes the arguments, sends them over Server-Sent Events (SSE) to the MCP server, waits for the DB/Web call to finish, and returns the string.
+
+<div class="decision-matrix">
+<strong>🤔 Thinking Matrix: MCP Edge Cases</strong>
+<ul>
+<li><strong>If</strong> the MCP Server process crashes entirely... <strong>Then</strong> the client's `httpx` session throws a connection error. The LangGraph node catches this exception and gracefully sets the state context to `"Error retrieving product info"`, allowing the Generator to apologize to the user instead of HTTP 500-ing.</li>
+<li><strong>If</strong> we want to add an Inventory Checking tool... <strong>Then</strong> we do NOT touch the FastAPI codebase or LangGraph. We simply add a new `@mcp.tool()` to the MCP server. The Client dynamically discovers it on reboot.</li>
+</ul>
+</div>
+
+---
+
+<div class="page-break"></div>
+
+## 🛡️ 4. Resilience: FastAPI Lifespan & Graceful Degradation
+
+A robust system does not crash when a downstream dependency fails.
+
+### The Step-By-Step Lifespan Algorithm
+1. `main.py` defines an `@asynccontextmanager def lifespan(app: FastAPI):`.
+2. The server attempts to initialize the `AgenticRAG` class and calls `await agent.async_init()`.
+3. The `async_init` method attempts to ping the MCP server and fetch tools.
+4. The MCP Server attempts to initialize AstraDB by pinging the endpoint with the application token.
+5. If the `.env` credentials are bad, `AstraDB` throws `httpx.ConnectError`.
+6. The exception bubbles up. The `lifespan` block intercepts it, logs a critical warning, and leaves `agent.mcp_tools = []`.
+7. `yield` is called, and the FastAPI application successfully binds to port 8000 and starts accepting traffic.
+
+<div class="decision-matrix">
+<strong>🤔 Thinking Matrix: Execution Edge Cases</strong>
+<ul>
+<li><strong>If</strong> the DB credentials are bad and the user sends a query... <strong>Then</strong> the graph reaches the Retriever node, detects that the tool list is empty, and returns `[HumanMessage("Retriever tool not found")]`. The Generator LLM sees this and responds: "I'm currently unable to access the product database, but I can still answer general questions."</li>
+</ul>
+</div>
+
+---
+
+<div class="page-break"></div>
+
+## 📂 5. The Project File Structure
+
+ShopBuddy follows **Domain-Driven Design (DDD)** concepts.
+
+```text
+ecomm-prod-assistant/
+├── prod_assistant/
+│   ├── api/
+│   │   ├── main.py             # FastAPI entrypoint, Lifespan handling, API endpoints
+│   ├── evaluation/
+│   │   ├── ragas_eval.py       # Ragas assessment suite (Context Precision, etc)
+│   ├── mcp_servers/
+│   │   ├── product_search_saver.py # FastMCP standalone server process
+│   ├── prompt_library/
+│   │   ├── prompts.py          # Enum-based centralized prompt registry
+│   ├── retriever/
+│   │   ├── retrieval.py        # AstraDB connection wrapper and SentenceTransformers
+│   ├── utils/
+│   │   ├── model_loader.py     # Centralized LLM factory (Groq, OpenAI)
+│   ├── workflow/
+│   │   ├── agentic_workflow... # LangGraph AgentState and Nodes
+├── tests/
+├── .env
+├── requirements.txt
+```
+
+<div class="decision-matrix">
+<strong>🤔 Thinking Matrix: Architecture Extensibility</strong>
+<ul>
+<li><strong>If</strong> we want to swap AstraDB for Pinecone... <strong>Then</strong> we only modify `retriever.py`. The `MCP Server`, `LangGraph Workflow`, and `FastAPI Router` are completely unaware of the underlying vector database due to strict abstraction boundaries.</li>
+</ul>
+</div>
+
+---
+
+<div class="page-break"></div>
+
+## 🛠️ 6. Live Interview Scenarios (Modifying the Codebase)
+
+A senior interviewer will ask you to change the architecture on the fly.
+
+### Scenario A: AstraDB vector searches are too slow for exact SKU matches.
+*   **The Problem:** Vector DBs use ANN (Approximate Nearest Neighbors) which requires high computational overhead. For exact queries like "iPhone 16 256GB Black", vector search is overkill and slow.
+*   **The Execution:** 
+    1. Implement a **Redis Cache** in the MCP Server.
+    2. Before embedding the query, check if the query string exists in Redis.
+    3. If yes, return the cached result instantly (O(1)). If no, proceed to AstraDB and then write the result back to Redis with a TTL of 1 hour.
+*   **The Result:** P99 Latency drops from 800ms to 5ms for common queries.
+
+### Scenario B: We want to scale to 500 different Tools.
+*   **The Problem:** If we give the LangGraph Assistant node a list of 500 tool descriptions, it will exceed the LLM context window and cause catastrophic hallucination.
+*   **The Execution:** 
+    1. Implement a **Supervisor Agent** Pattern.
+    2. Instead of one graph, create a hierarchical graph. The Supervisor categorizes the query (e.g., "Returns", "Inventory", "Recommendations").
+    3. The query is routed to a specialized Sub-Agent (e.g., "InventoryAgent") which only has access to 5 highly specific MCP tools.
+*   **The Result:** Token usage drops massively, accuracy increases, and tool execution is perfectly sandboxed.
+
+---
+
+<div class="page-break"></div>
+
+## 🎓 7. Tech Stack Cross-Questioning & Question Bank
+
+In interviews, you will face "Cross-Questioning" where they ask why you used one technology instead of another. **Memorize these defenses.**
+
+### ⚔️ ShopBuddy vs. Modern Tech Stack Alternatives
+
+**1. LangGraph vs. LangChain AgentExecutor**
+*   *Interviewer:* "Why did you use LangGraph instead of the standard LangChain AgentExecutor?"
+*   *Your Defense:* "AgentExecutor is a black box. It runs a `while` loop until the LLM decides to stop, which makes debugging nearly impossible and leads to infinite loops in production. By using LangGraph, I explicitly defined the state machine. I have absolute control over the routing logic, and I can inject custom code (like the `_grade_documents` node) between LLM thoughts. It provides deterministic control over non-deterministic models."
+
+**2. MCP Server vs. Standard Tool Calling**
+*   *Interviewer:* "Why go through the hassle of HTTP/SSE MCP servers instead of just importing the Python functions directly into the LangGraph file?"
+*   *Your Defense:* "Separation of concerns and scalability. By moving the Vector Database and Web Search into an MCP server, I decoupled the core reasoning engine from the data layer. In a production environment, the MCP server can be maintained, scaled, and deployed by the Data Engineering team entirely independently of the AI team managing the LangGraph nodes. It also allows multi-language support: the agent could be in Python, but the MCP tool server could be written in Go for speed."
+
+**3. AstraDB vs. Self-Hosted PostgreSQL (pgvector)**
+*   *Interviewer:* "AstraDB is a managed service. Why not just run a Postgres container with pgvector?"
+*   *Your Defense:* "For vector search, operational overhead is massive. Postgres with pgvector requires manual management of HNSW index memory limits, vacuuming, and replication. AstraDB abstracts all scaling and indexing away into a serverless API. Given that e-commerce traffic is highly volatile (e.g., Black Friday spikes), a serverless architecture ensures we pay for exactly what we use without provisioning massive idle clusters."
+
+**4. FastAPI vs. Django/Flask**
+*   *Interviewer:* "Why FastAPI?"
+*   *Your Defense:* "LangChain and LangGraph are heavily optimized for `asyncio` (`ainvoke`, `astream`). Flask and Django (traditionally synchronous) block the main thread during slow LLM generation calls. FastAPI is natively built on Starlette and ASGI, meaning it can handle thousands of concurrent LLM API calls without blocking, using minimal CPU."
+
+### 🏛️ Classic Agentic Architecture Question Bank
+*   **Q: How do you prevent the LLM from hallucinating product prices?**
+    *   *A:* The `Grader` node provides factual grounding. We also enforce strict prompt engineering in the `Generator` node, instructing it to *only* use the provided context. If the Grader determines the retrieved context does not answer the question, it forces the system to perform a DuckDuckGo web search rather than allowing the LLM to guess.
+*   **Q: How do you measure if the RAG system is actually good?**
+    *   *A:* Through the `ragas_eval.py` module. We run synthetic test datasets through the pipeline and mathematically measure `Context Precision` (did the retriever get the right chunks?) and `Answer Relevancy` (did the generator actually answer the prompt?). This turns subjective AI outputs into objective CI/CD metrics.
+</textarea>
+
+<div id="content"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+<script>
+    mermaid.initialize({ startOnLoad: false });
+
+    const text = document.getElementById('markdown-source').value;
+    
+    // Parse markdown into HTML
+    document.getElementById('content').innerHTML = marked.parse(text);
+
+    // Replace <pre><code class="language-mermaid"> with <div class="mermaid">
+    const mermaidBlocks = document.querySelectorAll('code.language-mermaid');
+    mermaidBlocks.forEach(block => {
+        const div = document.createElement('div');
+        div.className = 'mermaid';
+        div.textContent = block.textContent;
+        block.parentElement.replaceWith(div);
+    });
+
+    // Render Mermaid diagrams and trigger print
+    mermaid.run().then(() => {
+        setTimeout(() => {
+            window.print();
+        }, 1000);
+    }).catch(err => {
+        console.error("Mermaid error:", err);
+    });
+</script>
+</body>
+</html>
