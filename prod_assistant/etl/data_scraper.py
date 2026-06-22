@@ -88,13 +88,17 @@ class FlipkartScraper:
         except Exception:
             return url
 
-    def get_top_reviews(self,product_url,count=2):
+    def get_top_reviews(self, product_url, count=2, driver=None):
         """Get the top reviews for a product.
+        If a driver is provided, it will be reused (not closed by this method).
         """
-        driver = self._build_driver()
+        owns_driver = driver is None
+        if owns_driver:
+            driver = self._build_driver()
 
         if not product_url.startswith("http"):
-            driver.quit()
+            if owns_driver:
+                driver.quit()
             return "No reviews found"
 
         try:
@@ -102,10 +106,10 @@ class FlipkartScraper:
             time.sleep(2)
             current_url = driver.current_url
             try:
-                driver.find_element(By.XPATH, "//button[contains(text(), '✕')]").click()
+                driver.find_element(By.XPATH, "//button[contains(text(), '\u2715')]").click()
                 time.sleep(1)
             except Exception:
-                print("Error occurred while closing popup.")
+                pass
 
             # Scroll to ratings section to trigger lazy-load.
             try:
@@ -180,8 +184,6 @@ class FlipkartScraper:
                 dump_path = os.path.join(self.output_dir, "review_page_dump.html")
                 with open(dump_path, "w", encoding="utf-8") as f:
                     f.write(driver.page_source)
-                print(f"[debug] review page dumped to: {dump_path}")
-                print(f"[debug] review page url: {driver.current_url} (from {current_url})")
             # More flexible selectors: grab headings + bodies from common review card containers.
             review_cards = (
                 soup.select("div[data-review-id]") or
@@ -255,8 +257,6 @@ class FlipkartScraper:
                 page_text = re.sub(r"\s+", " ", page_text)
                 # Capture review snippets that appear before "READ MORE"
                 candidates = re.findall(r"(.{20,800}?)\\s+READ MORE", page_text, flags=re.IGNORECASE)
-                if os.getenv("DEBUG_REVIEW_DUMP") == "1":
-                    print(f"[debug] review candidates found: {len(candidates)}")
                 for c in candidates:
                     # Keep only the tail to avoid header/nav text
                     snippet = c[-350:]
@@ -269,8 +269,6 @@ class FlipkartScraper:
                     # If "Certified Buyer" is present, keep only the review text before it.
                     if "Certified Buyer" in cleaned:
                         cleaned = cleaned.split("Certified Buyer")[0].strip()
-                    if os.getenv("DEBUG_REVIEW_DUMP") == "1":
-                        print(f"[debug] candidate: {cleaned[:120]}")
                     # Avoid pulling page chrome/nav text.
                     if len(cleaned) < 30:
                         continue
@@ -284,8 +282,9 @@ class FlipkartScraper:
 
         except Exception:
             reviews = []
-
-        driver.quit()
+        finally:
+            if owns_driver:
+                driver.quit()
         return " || ".join(reviews) if reviews else "No reviews found"
     
     def scrape_flipkart_products(self, query, max_products=1, review_count=2):
@@ -345,11 +344,10 @@ class FlipkartScraper:
                     product_link = href if href.startswith("http") else "https://www.flipkart.com" + href
                     match = re.findall(r"/p/(itm[0-9A-Za-z]+)", href)
                     product_id = match[0] if match else "N/A"
-                except Exception as e:
-                    print(f"Error occurred while extracting product link: {e}")
+                except Exception:
                     continue
 
-                top_reviews = self.get_top_reviews(product_link, count=review_count) if "flipkart.com" in product_link else "Invalid product URL"
+                top_reviews = self.get_top_reviews(product_link, count=review_count, driver=driver) if "flipkart.com" in product_link else "Invalid product URL"
                 products.append([product_id, title, rating, total_reviews, price, top_reviews])
         finally:
             driver.quit()
