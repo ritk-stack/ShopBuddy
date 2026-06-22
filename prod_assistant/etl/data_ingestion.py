@@ -136,7 +136,9 @@ class DataIngestion:
 
         print(f"\nSample search results for query: '{query}'")
         for res in results:
-            print(f"Content: {res.page_content}\nMetadata: {res.metadata}\n")
+            content = res.page_content.encode("ascii", errors="replace").decode("ascii")
+            metadata = str(res.metadata).encode("ascii", errors="replace").decode("ascii")
+            print(f"Content: {content}\nMetadata: {metadata}\n")
 
 # Run if this file is executed directly
 if __name__ == "__main__":
